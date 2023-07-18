@@ -1,0 +1,628 @@
+From 6986f35becd9c6f6c4cb2b12462cf7e57035ceed Mon Sep 17 00:00:00 2001
+From: Siarhei Volkau <lis8215@gmail.com>
+Date: Thu, 1 Sep 2022 10:14:34 +0300
+Subject: [PATCH] add support of ingenic MXU version 1 instruction set
+
+This patch aims to add support for Xburst MXU instruction set into
+binutils. That patch is not cover MXU version 2 at all.
+
+TODO: test cases
+
+Signed-off-by: Siarhei Volkau <lis8215@gmail.com>
+---
+ bfd/elfxx-mips.c      |   4 +
+ binutils/readelf.c    |   4 +
+ gas/config/tc-mips.c  |  96 +++++++++++++++++++++++-
+ gas/doc/c-mips.texi   |   7 ++
+ include/elf/mips.h    |   4 +-
+ include/opcode/mips.h |   9 ++-
+ opcodes/mips-dis.c    |  29 +++++++
+ opcodes/mips-opc.c    | 170 ++++++++++++++++++++++++++++++++++++++++--
+ 8 files changed, 312 insertions(+), 11 deletions(-)
+
+diff --git a/bfd/elfxx-mips.c b/bfd/elfxx-mips.c
+index 97a406a8..519d4046 100644
+--- a/bfd/elfxx-mips.c
++++ b/bfd/elfxx-mips.c
+@@ -16134,6 +16134,10 @@ print_mips_ases (FILE *file, unsigned int mask)
+     fputs ("\n\tLoongson EXT ASE", file);
+   if (mask & AFL_ASE_LOONGSON_EXT2)
+     fputs ("\n\tLoongson EXT2 ASE", file);
++  if (mask & AFL_ASE_MXU1_R1)
++    fputs ("\n\tXBurst MXU1 revision 1 ASE", file);
++  if (mask & AFL_ASE_MXU1_R2)
++    fputs ("\n\tXBurst MXU1 revision 2 ASE", file);
+   if (mask == 0)
+     fprintf (file, "\n\t%s", _("None"));
+   else if ((mask & ~AFL_ASE_MASK) != 0)
+diff --git a/binutils/readelf.c b/binutils/readelf.c
+index b45683cd..7a92c8a7 100644
+--- a/binutils/readelf.c
++++ b/binutils/readelf.c
+@@ -18006,6 +18006,10 @@ print_mips_ases (unsigned int mask)
+     fputs ("\n\tLoongson EXT ASE", stdout);
+   if (mask & AFL_ASE_LOONGSON_EXT2)
+     fputs ("\n\tLoongson EXT2 ASE", stdout);
++  if (mask & AFL_ASE_MXU1_R1)
++    fputs ("\n\tXBurst MXU1 revision 1 ASE", stdout);
++  if (mask & AFL_ASE_MXU1_R2)
++    fputs ("\n\tXBurst MXU1 revision 2 ASE", stdout);
+   if (mask == 0)
+     fprintf (stdout, "\n\t%s", _("None"));
+   else if ((mask & ~AFL_ASE_MASK) != 0)
+diff --git a/gas/config/tc-mips.c b/gas/config/tc-mips.c
+index f632e94e..273d037e 100644
+--- a/gas/config/tc-mips.c
++++ b/gas/config/tc-mips.c
+@@ -357,6 +357,9 @@ static const char *mips_arch_string;
+ static int mips_tune = CPU_UNKNOWN;
+ static const char *mips_tune_string;
+ 
++/* The argument of the -mmxu= flag.  The version of MXU extension.  */
++static const char *xburst_mxu_string;
++
+ /* True when generating 32-bit code for a 64-bit processor.  */
+ static int mips_32bitmode = 0;
+ 
+@@ -1439,6 +1442,7 @@ struct mips_cpu_info
+ static const struct mips_cpu_info *mips_parse_cpu (const char *, const char *);
+ static const struct mips_cpu_info *mips_cpu_info_from_isa (int);
+ static const struct mips_cpu_info *mips_cpu_info_from_arch (int);
++static void xburst_parse_mxu (const char *, int *);
+ 
+ /* Command-line options.  */
+ const char *md_shortopts = "O::g::G:";
+@@ -1573,6 +1577,7 @@ enum options
+     OPTION_NO_LOONGSON_EXT,
+     OPTION_LOONGSON_EXT2,
+     OPTION_NO_LOONGSON_EXT2,
++    OPTION_MXU,
+     OPTION_END_OF_ENUM
+   };
+ 
+@@ -1615,6 +1620,7 @@ struct option md_longopts[] =
+   {"mno-dspr2", no_argument, NULL, OPTION_NO_DSPR2},
+   {"mdspr3", no_argument, NULL, OPTION_DSPR3},
+   {"mno-dspr3", no_argument, NULL, OPTION_NO_DSPR3},
++  {"mmxu", required_argument, NULL, OPTION_MXU},
+   {"meva", no_argument, NULL, OPTION_EVA},
+   {"mno-eva", no_argument, NULL, OPTION_NO_EVA},
+   {"mmicromips", no_argument, NULL, OPTION_MICROMIPS},
+@@ -1870,7 +1876,8 @@ static const struct mips_ase mips_ases[] = {
+ /* Groups of ASE_* flags that represent different revisions of an ASE.  */
+ static const unsigned int mips_ase_groups[] = {
+   ASE_DSP | ASE_DSPR2 | ASE_DSPR3, 
+-  ASE_LOONGSON_EXT | ASE_LOONGSON_EXT2 
++  ASE_LOONGSON_EXT | ASE_LOONGSON_EXT2,
++  ASE_MXU1_R1 | ASE_MXU1_R2,
+ };
+ 
+ /* Pseudo-op table.
+@@ -2695,6 +2702,7 @@ struct regname {
+ #define RTYPE_R5900_R	0x0200000
+ #define RTYPE_R5900_ACC	0x0400000
+ #define RTYPE_MSA	0x0800000
++#define RTYPE_MXU	0x1000000
+ #define RWARN		0x8000000
+ 
+ #define GENERIC_REGISTER_NUMBERS \
+@@ -2899,6 +2907,25 @@ struct regname {
+     {"$ac2",	RTYPE_ACC | 2}, \
+     {"$ac3",	RTYPE_ACC | 3}
+ 
++#define XBURST_MXU_REGISTER_NAMES \
++    {"$xr0",	RTYPE_MXU | 0},  \
++    {"$xr1",	RTYPE_MXU | 1},  \
++    {"$xr2",	RTYPE_MXU | 2},  \
++    {"$xr3",	RTYPE_MXU | 3},  \
++    {"$xr4",	RTYPE_MXU | 4},  \
++    {"$xr5",	RTYPE_MXU | 5},  \
++    {"$xr6",	RTYPE_MXU | 6},  \
++    {"$xr7",	RTYPE_MXU | 7},  \
++    {"$xr8",	RTYPE_MXU | 8},  \
++    {"$xr9",	RTYPE_MXU | 9},  \
++    {"$xr10",	RTYPE_MXU | 10}, \
++    {"$xr11",	RTYPE_MXU | 11}, \
++    {"$xr12",	RTYPE_MXU | 12}, \
++    {"$xr13",	RTYPE_MXU | 13}, \
++    {"$xr14",	RTYPE_MXU | 14}, \
++    {"$xr15",	RTYPE_MXU | 15}, \
++    {"$xr16",	RTYPE_MXU | 16}
++
+ static const struct regname reg_names[] = {
+   GENERIC_REGISTER_NUMBERS,
+   FPU_REGISTER_NAMES,
+@@ -2918,6 +2945,7 @@ static const struct regname reg_names[] = {
+   R5900_R_NAMES,
+   R5900_ACC_NAMES,
+   MIPS_DSP_ACCUMULATOR_NAMES,
++  XBURST_MXU_REGISTER_NAMES,
+   {0, 0}
+ };
+ 
+@@ -5081,6 +5109,8 @@ convert_reg_type (const struct mips_opcode *opcode,
+ 
+     case OP_REG_MSA_CTRL:
+       return RTYPE_NUM;
++    case OP_REG_MXU1:
++      return RTYPE_MXU;
+     }
+   abort ();
+ }
+@@ -8344,11 +8374,11 @@ match_insn (struct mips_cl_insn *insn, const struct mips_opcode *opcode,
+ 	case '-':
+ 	  switch (args[1])
+ 	    {
+-	    case 'A':
++	    case 'n':
+ 	      *offset_reloc = BFD_RELOC_MIPS_19_PCREL_S2;
+ 	      break;
+ 
+-	    case 'B':
++	    case 'o':
+ 	      *offset_reloc = BFD_RELOC_MIPS_18_PCREL_S3;
+ 	      break;
+ 	    }
+@@ -15214,6 +15244,10 @@ md_parse_option (int c, const char *arg)
+       mips_pic = VXWORKS_PIC;
+       break;
+ 
++    case OPTION_MXU:
++      xburst_mxu_string = arg;
++      break;
++
+     case OPTION_NAN:
+       if (strcmp (arg, "2008") == 0)
+ 	mips_nan2008 = 1;
+@@ -15310,6 +15344,8 @@ mips_after_parse_args (void)
+   if (((file_mips_opts.ase & ASE_EVA) != 0) && ISA_IS_R6 (file_mips_opts.isa))
+     file_mips_opts.ase |= ASE_EVA_R6;
+ 
++  if (xburst_mxu_string != 0)
++    xburst_parse_mxu (xburst_mxu_string, &file_mips_opts.ase);
+   /* Set up initial mips_opts state.  */
+   mips_opts = file_mips_opts;
+ 
+@@ -19381,6 +19417,10 @@ mips_convert_ase_flags (int ase)
+     ext_ases |= AFL_ASE_LOONGSON_EXT;
+   if (ase & ASE_LOONGSON_EXT2)
+     ext_ases |= AFL_ASE_LOONGSON_EXT2;
++  if (ase & ASE_MXU1_R1)
++    ext_ases |= AFL_ASE_MXU1_R1;
++  if (ase & ASE_MXU1_R2)
++    ext_ases |= AFL_ASE_MXU1_R2;
+ 
+   return ext_ases;
+ }
+@@ -20158,6 +20198,13 @@ static const struct mips_cpu_info mips_cpu_info_table[] =
+ 						ISA_MIPS64R6, CPU_MIPS64R6},
+   { "p6600",	      0, ASE_VIRT | ASE_MSA,	ISA_MIPS64R6, CPU_MIPS64R6},
+ 
++  /* Ingenic Xburst */
++  { "jz4740",         0, ASE_MXU1_R1,		ISA_MIPS32,   CPU_MIPS32 },
++  { "jz4760",         0, ASE_MXU1_R1 | ASE_MXU1_R2,
++						ISA_MIPS32,   CPU_MIPS32 },
++  { "jz4770",         0, ASE_MXU1_R1 | ASE_MXU1_R2,
++						ISA_MIPS32R2, CPU_MIPS32R2 },
++
+   /* End marker.  */
+   { NULL, 0, 0, 0, 0 }
+ };
+@@ -20263,6 +20310,8 @@ mips_parse_cpu (const char *option, const char *cpu_string)
+   return 0;
+ }
+ 
++
++
+ /* Return the canonical processor information for ISA (a member of the
+    ISA_MIPS* enumeration).  */
+ 
+@@ -20291,6 +20340,34 @@ mips_cpu_info_from_arch (int arch)
+   return NULL;
+ }
+ 
++static void xburst_parse_mxu (const char *mxu, int *ase_flags)
++{
++  int clear_msk = ~(ASE_MXU1_R1 | ASE_MXU1_R2);
++  int set_msk = -1;
++
++  if (strcasecmp(mxu, "r1") == 0)
++    set_msk = ASE_MXU1_R1;
++  if (strcasecmp(mxu, "1.0") == 0)
++    set_msk = ASE_MXU1_R1;
++  if (strcasecmp(mxu, "r2") == 0)
++    set_msk = ASE_MXU1_R1 | ASE_MXU1_R2;
++  if (strcasecmp(mxu, "1.1") == 0)
++    set_msk = ASE_MXU1_R1 | ASE_MXU1_R2;
++  if (strcasecmp(mxu, "lx") == 0)
++    set_msk = ASE_MXU1_R1 | ASE_MXU1_R2;
++  if (strcasecmp(mxu, "none") == 0)
++    set_msk = 0;
++  if (strcasecmp(mxu, "off") == 0)
++    set_msk = 0;
++  if (set_msk == -1)
++    {
++      as_bad (_("bad value (%s) for %s"), mxu, "-mmxu");
++      set_msk = 0;
++    }
++  *ase_flags &= clear_msk;
++  *ase_flags |= set_msk;
++}
++
+ static void
+ show (FILE *stream, const char *string, int *col_p, int *first_p)
+ {
+@@ -20425,6 +20502,19 @@ MIPS options:\n\
+   fprintf (stream, _("\
+ -minsn32		only generate 32-bit microMIPS instructions\n\
+ -mno-insn32		generate all microMIPS instructions\n"));
++  fprintf (stream, _("\
++-mmxu=REVISION		generate XBurst SIMD/MXU (REVISION) instructions either of:\n"));
++  first = 1;
++
++  show (stream, "off",  &column, &first);
++  show (stream, "none",  &column, &first);
++  show (stream, "r1",  &column, &first);
++  show (stream, "1.0", &column, &first);
++  show (stream, "r2",  &column, &first);
++  show (stream, "1.1", &column, &first);
++  show (stream, "lx",  &column, &first);
++
++  fputc ('\n', stream);
+ #if DEFAULT_MIPS_FIX_LOONGSON3_LLSC
+   fprintf (stream, _("\
+ -mfix-loongson3-llsc	work around Loongson3 LL/SC errata, default\n\
+diff --git a/gas/doc/c-mips.texi b/gas/doc/c-mips.texi
+index 74492f5e..96e6bb3f 100644
+--- a/gas/doc/c-mips.texi
++++ b/gas/doc/c-mips.texi
+@@ -274,6 +274,10 @@ Application Specific Extension.  This tells the assembler to accept EXT2
+ instructions.
+ @samp{-mno-loongson-ext2} turns off this option.
+ 
++@item -mmxu=REV
++Generate code for the XBurst SIMD/DSP called MXU (REV).
++This tells the assembler to accept MXU instructions or not.
++
+ @item -minsn32
+ @itemx -mno-insn32
+ Only use 32-bit instruction encodings when generating code for the
+@@ -451,6 +455,9 @@ sb1a,
+ i6400,
+ i6500,
+ p6600,
++jz4740,
++jz4760,
++jz4770,
+ loongson2e,
+ loongson2f,
+ gs464,
+diff --git a/include/elf/mips.h b/include/elf/mips.h
+index 823f8dc9..c5b5bdb4 100644
+--- a/include/elf/mips.h
++++ b/include/elf/mips.h
+@@ -1250,7 +1250,9 @@ extern void bfd_mips_elf_swap_abiflags_v0_out
+ #define AFL_ASE_LOONGSON_CAM 0x00080000 /* Loongson CAM ASE.  */
+ #define AFL_ASE_LOONGSON_EXT 0x00100000 /* Loongson EXT instructions.  */
+ #define AFL_ASE_LOONGSON_EXT2 0x00200000 /* Loongson EXT2 instructions.  */
+-#define AFL_ASE_MASK         0x003effff /* All ASEs.  */
++#define AFL_ASE_MXU1_R1      0x00400000 /* XBurst MXU rev.1 instructions.  */
++#define AFL_ASE_MXU1_R2      0x00800000 /* XBurst MXU rev.2 instructions.  */
++#define AFL_ASE_MASK         0x00feffff /* All ASEs.  */
+ 
+ /* Values for the isa_ext word of an ABI flags structure.  */
+ 
+diff --git a/include/opcode/mips.h b/include/opcode/mips.h
+index 8603a585..2961385b 100644
+--- a/include/opcode/mips.h
++++ b/include/opcode/mips.h
+@@ -485,7 +485,10 @@ enum mips_reg_operand_type {
+   OP_REG_MSA,
+ 
+   /* MSA control registers $0-$31.  */
+-  OP_REG_MSA_CTRL
++  OP_REG_MSA_CTRL,
++
++  /* XBurst MXU1 registers xr0-xr16  */
++  OP_REG_MXU1,
+ };
+ 
+ /* Base class for all operands.  */
+@@ -1316,6 +1319,10 @@ static const unsigned int mips_isa_table[] = {
+ /* The Enhanced VA Scheme (EVA) extension has instructions which are
+    only valid for the R6 ISA.  */
+ #define ASE_EVA_R6		0x02000000
++/* Ingenic MXU1 r1 extension instructions */
++#define ASE_MXU1_R1		0x04000000
++/* Ingenic MXU1 r2 extension instructions */
++#define ASE_MXU1_R2		0x08000000
+ 
+ /* MIPS ISA defines, use instead of hardcoding ISA level.  */
+ 
+diff --git a/opcodes/mips-dis.c b/opcodes/mips-dis.c
+index 9db604ff..e8cde0de 100644
+--- a/opcodes/mips-dis.c
++++ b/opcodes/mips-dis.c
+@@ -206,6 +206,14 @@ static const char * const mips_cp1_names_mips3264[32] =
+   "c1_fenr",      "$29",          "$30",          "c1_fcsr"
+ };
+ 
++static const char * const xburst_mxu1_names[32] =
++{
++  "$xr0",    "$xr1", "$xr2",  "$xr3",  "$xr4",  "$xr5",  "$xr6",  "$xr7",
++  "$xr8",    "$xr9", "$xr10", "$xr11", "$xr12", "$xr13", "$xr14", "$xr15",
++  "mxu_cr",  "?" ,   "?",     "?",     "?",     "?",     "?",     "?"
++  "?",       "?" ,   "?",     "?",     "?",     "?",     "?",     "?"
++};
++
+ static const struct mips_cp0sel_name mips_cp0sel_names_mips3264[] =
+ {
+   { 16, 1, "c0_config1"		},
+@@ -593,6 +601,24 @@ const struct mips_arch_choice mips_arch_choices[] =
+     mips_cp0sel_names_mips3264r2, ARRAY_SIZE (mips_cp0sel_names_mips3264r2),
+     mips_cp1_names_mips3264, mips_hwr_names_mips3264r2 },
+ 
++  { "jz4740",	1, bfd_mach_mipsisa32, CPU_MIPS32,
++    ISA_MIPS32,  ASE_MXU1_R1,
++    mips_cp0_names_mips3264,
++    mips_cp0sel_names_mips3264, ARRAY_SIZE (mips_cp0sel_names_mips3264),
++    mips_cp1_names_mips3264, mips_hwr_names_numeric },
++
++  { "jz4760",	1, bfd_mach_mipsisa32, CPU_MIPS32,
++    ISA_MIPS32,  (ASE_MXU1_R1 | ASE_MXU1_R2),
++    mips_cp0_names_mips3264,
++    mips_cp0sel_names_mips3264, ARRAY_SIZE (mips_cp0sel_names_mips3264),
++    mips_cp1_names_mips3264, mips_hwr_names_numeric },
++
++  { "jz4770",	1, bfd_mach_mipsisa32r2, CPU_MIPS32R2,
++    ISA_MIPS32R2,  (ASE_MXU1_R1 | ASE_MXU1_R2),
++    mips_cp0_names_mips3264r2,
++    mips_cp0sel_names_mips3264r2, ARRAY_SIZE (mips_cp0sel_names_mips3264r2),
++    mips_cp1_names_mips3264, mips_hwr_names_mips3264r2 },
++
+   /* For stock MIPS64, disassemble all applicable MIPS-specified ASEs.  */
+   { "mips64",	1, bfd_mach_mipsisa64, CPU_MIPS64,
+     ISA_MIPS64,  ASE_MIPS3D | ASE_MDMX,
+@@ -1251,6 +1277,9 @@ print_reg (struct disassemble_info *info, const struct mips_opcode *opcode,
+       info->fprintf_func (info->stream, "%s", msa_control_names[regno]);
+       break;
+ 
++    case OP_REG_MXU1:
++      info->fprintf_func (info->stream, "%s", xburst_mxu1_names[regno]);
++      break;
+     }
+ }
+ 
+diff --git a/opcodes/mips-opc.c b/opcodes/mips-opc.c
+index 0f596d5d..01e01302 100644
+--- a/opcodes/mips-opc.c
++++ b/opcodes/mips-opc.c
+@@ -47,6 +47,8 @@ decode_mips_operand (const char *p)
+ 	case 'b': INT_ADJ (18, 0, 131071, 3, false);
+ 	case 'd': SPECIAL (0, 0, REPEAT_DEST_REG);
+ 	case 'm': SPECIAL (20, 6, SAVE_RESTORE_LIST);
++	case 'n': PCREL (19, 0, true, 2, 2, false, false);
++	case 'o': PCREL (18, 0, true, 3, 3, false, false);
+ 	case 's': SPECIAL (5, 21, NON_ZERO_REG);
+ 	case 't': SPECIAL (5, 16, NON_ZERO_REG);
+ 	case 'u': PREV_CHECK (5, 16, true, false, false, false);
+@@ -54,8 +56,29 @@ decode_mips_operand (const char *p)
+ 	case 'w': PREV_CHECK (5, 16, false, true, true, true);
+ 	case 'x': PREV_CHECK (5, 21, true, false, false, true);
+ 	case 'y': PREV_CHECK (5, 21, false, true, false, false);
+-	case 'A': PCREL (19, 0, true, 2, 2, false, false);
+-	case 'B': PCREL (18, 0, true, 3, 3, false, false);
++
++        case 'A': REG (4, 6, MXU1);
++	case 'B': REG (4, 10, MXU1);
++	case 'C': REG (4, 14, MXU1);
++	case 'D': REG (4, 18, MXU1);
++	case 'E': REG (5, 6, MXU1);
++	case 'e': INT_ADJ (3, 23, 4, 0, false);	/* MXU PTN   (0 .. 4) */
++	case 'f': UINT (3, 18);			/* MXU PTN   (0 .. 7) */
++	case 'g': UINT (2, 19);			/* MXU PTN   (0 .. 3) */
++	case 'h': UINT (1, 19);			/* MXU PTN   (0 .. 1) */
++	case 'i': UINT (2, 24);			/* MXU APTN2 (0 .. 3) */
++	case 'j': UINT (1, 24);			/* MXU APTN1 (0 .. 1) */
++	case 'k': UINT (2, 22);			/* MXU MPTN2/OPTN2 (0 .. 3) */
++	case 'l': INT_ADJ (2, 9, 2, 0, false);	/* MXU STRD2 (0 .. 2) */
++	case 'p': INT_ADJ (2, 14, 2, 0, false);	/* MXU STRD2 (0 .. 2) */
++	case 'q': INT_ADJ (10, 10, 511, 2, false); /* offset (-512 .. 511) << 2 */
++	case 'r': INT_ADJ (9, 10, 255, 1, false); /* offset (-256 .. 255) << 1 */
++
++        case 'O': SINT (8, 10);			/* offset (-128 .. 127) */
++        case 'Q': UINT (8, 10);			/* immediate (0 .. 255) */
++	case 'S': UINT (4, 22);			/* MXU shift (0 .. 15) */
++	case 'P': UINT (3, 23);			/* MXU PTN   (0 .. 7) */
++	case 'X': UINT (5, 16);			/* bits to extract  (1 .. 31) */
+ 	}
+       break;
+ 
+@@ -425,6 +448,11 @@ decode_mips_operand (const char *p)
+ /* Loongson EXTensions R2 (EXT2) instructions support.  */
+ #define LEXT2	ASE_LOONGSON_EXT2
+ 
++/* Ingenic extensions  */
++#define MXU1	ASE_MXU1_R1
++#define MXUR2	ASE_MXU1_R2
++
++
+ /* The order of overloaded instructions matters.  Label arguments and
+    register arguments look the same. Instructions that can have either
+    for arguments must apear in the correct order in this table for the
+@@ -463,7 +491,7 @@ const struct mips_opcode mips_builtin_opcodes[] =
+ {"bal",			"p",		0x04110000, 0xffff0000,	WR_31|UBD,		INSN2_ALIAS,	I1,		0,	0 },/* bgezal 0*/
+ {"bc",			"+'",		0xc8000000, 0xfc000000,	NODS,			0,		I37,		0,	0 },
+ {"balc",		"+'",		0xe8000000, 0xfc000000,	WR_31|NODS,		0,		I37,		0,	0 },
+-{"lapc",		"s,-A",		0xec000000, 0xfc180000, WR_1,			RD_pc,		I37,		0,	0 },
++{"lapc",		"s,-n",		0xec000000, 0xfc180000, WR_1,			RD_pc,		I37,		0,	0 },
+ {"la",			"t,A(b)",	0,    (int) M_LA_AB,	INSN_MACRO,		0,		I1,		0,	0 },
+ 
+ /* Loongson specific instructions.  Loongson gs464 (aka loongson3a) redefines the Coprocessor 2
+@@ -1261,7 +1289,7 @@ const struct mips_opcode mips_builtin_opcodes[] =
+ {"lwx",			"d,t(b)",	0x7c00000a, 0xfc0007ff, WR_1|RD_2|RD_3|LM,	0,		IOCT2,		D32,	0},
+ {"lwux",		"d,t(b)",	0x7c00040a, 0xfc0007ff, WR_1|RD_2|RD_3|LM,	0,		IOCT2,		0,	0 },
+ {"lca",			"t,A(b)",	0,    (int) M_LCA_AB,	INSN_MACRO,		0,		I1,		0,	0 },
+-{"ldpc",		"s,-B",		0xec180000, 0xfc1c0000, WR_1,			RD_pc,		I69,		0,	0 },
++{"ldpc",		"s,-o",		0xec180000, 0xfc1c0000, WR_1,			RD_pc,		I69,		0,	0 },
+ /* The macro has to be first to handle o32 correctly.  */
+ {"ld",			"s,-b(+R)",	0xec180000, 0xfc1c0000, WR_1,			RD_pc,		I69,		0,	0 },
+ {"ld",			"t,A(b)",	0,    (int) M_LD_AB,	INSN_MACRO,		0,		I1,		0,	0 },
+@@ -1310,7 +1338,7 @@ const struct mips_opcode mips_builtin_opcodes[] =
+ {"lqc2",		"+7,A(b)",	0,    (int) M_LQC2_AB,	INSN_MACRO,		0,		EE,		0,	0 },
+ {"lui",			"t,u",		0x3c000000, 0xffe00000,	WR_1,			0,		I1,		0,	0 },
+ {"luxc1",		"D,t(b)",	0x4c000005, 0xfc00f83f, WR_1|RD_2|RD_3|LM|FP_D, 0,		I5_33|N55,	0,	I37},
+-{"lwpc",		"s,-A",		0xec080000, 0xfc180000, WR_1|LM,		RD_pc,		I37,		0,	0 },
++{"lwpc",		"s,-n",		0xec080000, 0xfc180000, WR_1|LM,		RD_pc,		I37,		0,	0 },
+ {"lw",			"t,o(b)",	0x8c000000, 0xfc000000,	WR_1|RD_3|LM,		0,		I1,		0,	0 },
+ {"lw",			"s,-a(+R)",	0xec080000, 0xfc180000, WR_1|LM,		RD_pc,		I37,		0,	0 },
+ {"lw",			"t,A(b)",	0,    (int) M_LW_AB,	INSN_MACRO,		0,		I1,		0,	0 },
+@@ -1336,7 +1364,7 @@ const struct mips_opcode mips_builtin_opcodes[] =
+ {"flush",		"t,o(b)",	0x98000000, 0xfc000000,	WR_1|RD_3|LM,		0,		I2,		0,	I37 }, /* same */
+ {"flush",		"t,A(b)",	0,    (int) M_LWR_AB,	INSN_MACRO,		0,		I2,		0,	I37 }, /* as lwr */
+ {"fork",		"d,s,t",	0x7c000008, 0xfc0007ff, WR_1|RD_2|RD_3|TRAP,	0,		0,		MT32,	0 },
+-{"lwupc",		"s,-A",		0xec100000, 0xfc180000, WR_1,			RD_pc,		I69,		0,	0 },
++{"lwupc",		"s,-n",		0xec100000, 0xfc180000, WR_1,			RD_pc,		I69,		0,	0 },
+ {"lwu",			"t,o(b)",	0x9c000000, 0xfc000000,	WR_1|RD_3|LM,		0,		I3,		0,	0 },
+ {"lwu"	,		"s,-a(+R)",	0xec100000, 0xfc180000, WR_1,			RD_pc,		I69,		0,	0 },
+ {"lwu",			"t,A(b)",	0,    (int) M_LWU_AB,	INSN_MACRO,		0,		I3,		0,	0 },
+@@ -3412,6 +3440,136 @@ const struct mips_opcode mips_builtin_opcodes[] =
+ {"cop1",		"C",		0,    (int) M_COP1,	INSN_MACRO,		INSN2_M_FP_S,	I1,		0,	0 },
+ {"cop2",		"C",		0,    (int) M_COP2,	INSN_MACRO,		0,		I1,		0,	N54|IOCT|IOCTP|IOCT2 },
+ {"cop3",		"C",		0,    (int) M_COP3,	INSN_MACRO,		0,		I1,		0,	I3_33 },
++
++/* Ingenic MXU1 release1 & release2 */
++{"lxw",			"d,s,t,-l",	0x700000e8, 0xfc0001ff,	WR_1|RD_2|RD_3|LM,	0,		I32,	MXUR2,	0 },
++{"lxh",			"d,s,t,-l",	0x70000068, 0xfc0001ff,	WR_1|RD_2|RD_3|LM,	0,		I32,	MXUR2,	0 },
++{"lxhu",		"d,s,t,-l",	0x70000168, 0xfc0001ff,	WR_1|RD_2|RD_3|LM,	0,		I32,	MXUR2,	0 },
++{"lxb",			"d,s,t,-l",	0x70000028, 0xfc0001ff,	WR_1|RD_2|RD_3|LM,	0,		I32,	MXUR2,	0 },
++{"lxbu",		"d,s,t,-l",	0x70000128, 0xfc0001ff,	WR_1|RD_2|RD_3|LM,	0,		I32,	MXUR2,	0 },
++
++{"s32ldd",		"-A,s,-q",	0x70000010, 0xfc10003f,	WR_1|RD_2|LM,		0,		I32,	MXU1,	0 },
++{"s32std",		"-A,s,-q",	0x70000011, 0xfc10003f,	RD_1|RD_2|SM,		0,		I32,	MXU1,	0 },
++{"s32lddv",		"-A,s,t,-p",	0x70000012, 0xfc003c3f,	WR_1|RD_2|RD_3|LM,	0,		I32,	MXU1,	0 },
++{"s32stdv",		"-A,s,t,-p",	0x70000013, 0xfc003c3f,	RD_1|RD_2|RD_3|SM,	0,		I32,	MXU1,	0 },
++{"s32ldi",		"-A,s,-q",	0x70000014, 0xfc10003f,	WR_1|MOD_2|LM,		0,		I32,	MXU1,	0 },
++{"s32sdi",		"-A,s,-q",	0x70000015, 0xfc10003f,	RD_1|MOD_2|SM,		0,		I32,	MXU1,	0 },
++{"s32ldiv",		"-A,s,t,-p",	0x70000016, 0xfc003c3f,	WR_1|MOD_2|RD_3|LM,	0,		I32,	MXU1,	0 },
++{"s32sdiv",		"-A,s,t,-p",	0x70000017, 0xfc003c3f,	RD_1|MOD_2|RD_3|SM,	0,		I32,	MXU1,	0 },
++
++{"s32lddr",		"-A,s,-q",	0x70100010, 0xfc10003f,	WR_1|RD_2|LM,		0,		I32,	MXUR2,	0 },
++{"s32stdr",		"-A,s,-q",	0x70100011, 0xfc10003f,	RD_1|RD_2|SM,		0,		I32,	MXUR2,	0 },
++{"s32lddvr",		"-A,s,t,-p",	0x70000412, 0xfc003c3f,	WR_1|RD_2|RD_3|LM,	0,		I32,	MXUR2,	0 },
++{"s32stdvr",		"-A,s,t,-p",	0x70000413, 0xfc003c3f,	RD_1|RD_2|RD_3|SM,	0,		I32,	MXUR2,	0 },
++{"s32ldir",		"-A,s,-q",	0x70100014, 0xfc10003f,	WR_1|MOD_2|LM,		0,		I32,	MXUR2,	0 },
++{"s32sdir",		"-A,s,-q",	0x70100015, 0xfc10003f,	RD_1|MOD_2|SM,		0,		I32,	MXUR2,	0 },
++{"s32ldivr",		"-A,s,t,-p",	0x70000416, 0xfc003c3f,	WR_1|MOD_2|RD_3|LM,	0,		I32,	MXUR2,	0 },
++{"s32sdivr",		"-A,s,t,-p",	0x70000417, 0xfc003c3f,	RD_1|MOD_2|RD_3|SM,	0,		I32,	MXUR2,	0 },
++
++{"s16ldd",		"-A,s,-r,-g",	0x7000002a, 0xfc00003f,	WR_1|RD_2|LM,		0,		I32,	MXUR2,	0 },
++{"s16std",		"-A,s,-r,-h",	0x7000002b, 0xfc10003f,	RD_1|RD_2|SM,		0,		I32,	MXUR2,	0 },
++{"s16ldi",		"-A,s,-r,-g",	0x7000002c, 0xfc00003f,	WR_1|MOD_2|LM,		0,		I32,	MXUR2,	0 },
++{"s16sdi",		"-A,s,-r,-h",	0x7000002d, 0xfc10003f,	RD_1|MOD_2|SM,		0,		I32,	MXUR2,	0 },
++
++{"s8ldd",		"-A,s,-O,-f",	0x70000022, 0xfc00003f,	WR_1|RD_2|LM,		0,		I32,	MXUR2,	0 },
++{"s8std",		"-A,s,-O,-f",	0x70000023, 0xfc00003f,	RD_1|RD_2|SM,		0,		I32,	MXUR2,	0 },
++{"s8ldi",		"-A,s,-O,-f",	0x70000024, 0xfc00003f,	WR_1|MOD_2|LM,		0,		I32,	MXUR2,	0 },
++{"s8sdi",		"-A,s,-O,-f",	0x70000025, 0xfc00003f,	RD_1|MOD_2|SM,		0,		I32,	MXUR2,	0 },
++
++{"s32madd",		"-A,-B,s,t",	0x70008000, 0xfc00c03f,	MOD_1|MOD_2|RD_3|RD_4|WR_HILO,	0,	I32,	MXUR2,	0 },
++{"s32maddu",		"-A,-B,s,t",	0x70008001, 0xfc00c03f,	MOD_1|MOD_2|RD_3|RD_4|WR_HILO,	0,	I32,	MXUR2,	0 },
++{"s32msub",		"-A,-B,s,t",	0x70008004, 0xfc00c03f,	MOD_1|MOD_2|RD_3|RD_4|WR_HILO,	0,	I32,	MXUR2,	0 },
++{"s32msubu",		"-A,-B,s,t",	0x70008005, 0xfc00c03f,	MOD_1|MOD_2|RD_3|RD_4|WR_HILO,	0,	I32,	MXUR2,	0 },
++{"s32mul",		"-A,-B,s,t",	0x70000026, 0xfc00c03f,	WR_1|WR_2|RD_3|RD_4|WR_HILO,	0,	I32,	MXUR2,	0 },
++{"s32mulu",		"-A,-B,s,t",	0x70004026, 0xfc00c03f,	WR_1|WR_2|RD_3|RD_4|WR_HILO,	0,	I32,	MXUR2,	0 },
++
++{"d16mulf",		"-A,-B,-C,-k",	0x70000009, 0xff3c003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"s32cps",		"-A,-B,-C",	0x70000007, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"d16cps",		"-A,-B,-C",	0x70080007, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"d16avg",		"-A,-B,-C",	0x70080006, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"d16avgr",		"-A,-B,-C",	0x700c0006, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++/* "q8add" is obsolete but kept for compatibility */
++{"q8add",		"-A,-B,-C,-i",	0x701c0006, 0xfcfc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"q8abd",		"-A,-B,-C",	0x70100007, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"q8avg",		"-A,-B,-C",	0x70100006, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"q8avgr",		"-A,-B,-C",	0x70140006, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"d8sum",		"-A,-B,-C",	0x7040001c, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"d8sumc",		"-A,-B,-C",	0x7080001c, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"d32sarl",		"-A,-B,-C,-S",	0x70000032, 0xfc3c003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"d32sarw",		"-A,-B,-C,s",	0x70000027, 0xfc1c003f,	WR_1|RD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"d32sllv",		"-B,-C,s",	0x70000036, 0xfc1c03ff,	MOD_1|MOD_2|RD_3,	0,	I32,	MXU1,	0 },
++{"d32slrv",		"-B,-C,s",	0x70040036, 0xfc1c03ff,	MOD_1|MOD_2|RD_3,	0,	I32,	MXU1,	0 },
++{"d32sarv",		"-B,-C,s",	0x700c0036, 0xfc1c03ff,	MOD_1|MOD_2|RD_3,	0,	I32,	MXU1,	0 },
++{"q16sllv",		"-B,-C,s",	0x70100036, 0xfc1c03ff,	MOD_1|MOD_2|RD_3,	0,	I32,	MXU1,	0 },
++{"q16slrv",		"-B,-C,s",	0x70140036, 0xfc1c03ff,	MOD_1|MOD_2|RD_3,	0,	I32,	MXU1,	0 },
++{"q16sarv",		"-B,-C,s",	0x701c0036, 0xfc1c03ff,	MOD_1|MOD_2|RD_3,	0,	I32,	MXU1,	0 },
++{"s32max",		"-A,-B,-C",	0x70000003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"s32min",		"-A,-B,-C",	0x70040003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"d16max",		"-A,-B,-C",	0x70080003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"d16min",		"-A,-B,-C",	0x700c0003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"q8max",		"-A,-B,-C",	0x70100003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"q8min",		"-A,-B,-C",	0x70140003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++{"s32slt",		"-A,-B,-C",	0x70000006, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"d16slt",		"-A,-B,-C",	0x70040006, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"q8slt",		"-A,-B,-C",	0x70180003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"q8sltu",		"-A,-B,-C",	0x701c0003, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32movz",		"-A,-B,-C",	0x70100039, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"d16movz",		"-A,-B,-C",	0x70080039, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"q8movz",		"-A,-B,-C",	0x70000039, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32movn",		"-A,-B,-C",	0x70140039, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"d16movn",		"-A,-B,-C",	0x700c0039, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"q8movn",		"-A,-B,-C",	0x70040039, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32nor",		"-A,-B,-C",	0x70100027, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32and",		"-A,-B,-C",	0x70140027, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32xor",		"-A,-B,-C",	0x701c0027, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32or",		"-A,-B,-C",	0x70180027, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32m2i",		"-E,t",		0x7000002e, 0xffe0f83f,	RD_1|WR_2,		0,	I32,	MXU1,	0 },
++{"s32i2m",		"-E,t",		0x7000002f, 0xffe0f83f,	WR_1|RD_2,		0,	I32,	MXU1,	0 },
++{"s32aln",		"-A,-B,-C,s",	0x70040027, 0xfc1c003f,	WR_1|RD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"s32alni",		"-A,-B,-C,-e",	0x70080027, 0xfc7c003f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32lui",		"-A,-Q,-P",	0x700c0027, 0xfc7c003f,	WR_1,			0,	I32,	MXUR2,	0 },
++{"s32extr",		"-A,-B,s,-X",	0x70008026, 0xfc00c03f,	WR_1|RD_2|RD_3,		0,	I32,	MXUR2,	0 },
++{"s32extrv",		"-A,-B,s,t",	0x7000c026, 0xfc00c03f,	WR_1|RD_2|RD_3|RD_4,	0,	I32,	MXUR2,	0 },
++{"q16sat",		"-A,-B,-C",	0x70180007, 0xfffc003f,	WR_1|RD_2|RD_3,		0,	I32,	MXU1,	0 },
++
++/* note these assembler commands doesn't compatible with MXU manual due to write into 4-th operand.
++ * binutils doesn't support that, so 4-th operand moved to 2-nd place.
++ */
++{"d16mul",		"-A,-D,-B,-C,-k", 0x70000008, 0xff00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"d16mule",		"-A,-D,-B,-C,-k", 0x71000009, 0xff00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXUR2,	0 },
++{"d16mac",		"-A,-D,-B,-C,-i,-k", 0x7000000a, 0xfc00003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"d16mace",		"-A,-D,-B,-C,-i,-k", 0x7000000f, 0xfc00003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXUR2,	0 },
++{"d16macf",		"-A,-D,-B,-C,-i,-k", 0x7000000b, 0xfc00003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++/* Note: destination register placed first, one more difference from the manual */
++{"d16madl",		"-D,-A,-B,-C,-i,-k", 0x7000000c, 0xfc00003f, WR_1|RD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++/* Note: destination register placed first, one more difference from the manual */
++{"s16mad",		"-D,-A,-B,-C,-j,-k", 0x7000000d, 0xfe00003f, WR_1|RD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"q8mul",		"-A,-D,-B,-C",	0x70000038, 0xffc0003f,	WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"q8mulsu",		"-A,-D,-B,-C",	0x70800038, 0xffc0003f,	WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXUR2,	0 },
++{"q8mac",		"-A,-D,-B,-C,-i", 0x7000003a, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"q8macsu",		"-A,-D,-B,-C,-i", 0x7080003a, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXUR2,	0 },
++/* "q8madl" is obsolete but kept for compatibility */
++{"q8madl",		"-A,-D,-B,-C,-i", 0x7000003c, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"d32add",		"-A,-D,-B,-C,-i", 0x70000018, 0xfcc0003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"d32acc",		"-A,-D,-B,-C,-i", 0x70000019, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"d32addc",		"-A,-D,-B,-C",	0x70400018, 0xffc0003f,	MOD_1|MOD_2|RD_3|RD_4,		0,	I32,	MXUR2,	0 },
++{"d32accm",		"-A,-D,-B,-C,-i", 0x70400019, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXUR2,	0 },
++{"d32asum",		"-A,-D,-B,-C,-i", 0x70800019, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXUR2,	0 },
++{"q16add",		"-A,-D,-B,-C,-i,-k", 0x7000000e, 0xfc00003f, WR_1|WR_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"q16acc",		"-A,-D,-B,-C,-i", 0x7000001b, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"q16accm",		"-A,-D,-B,-C,-i", 0x7040001b, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXUR2,	0 },
++{"d16asum",		"-A,-D,-B,-C,-i", 0x7080001b, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXUR2,	0 },
++{"q8adde",		"-A,-D,-B,-C,-i", 0x7000001c, 0xfcc0003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"q8acce",		"-A,-D,-B,-C,-i", 0x7000001d, 0xfcc0003f, MOD_1|MOD_2|RD_3|RD_4,	0,	I32,	MXU1,	0 },
++{"q8sad",		"-A,-D,-B,-C",	0x7000003e, 0xffc0003f,	WR_1|MOD_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"d32sll",		"-A,-D,-B,-C,-S", 0x70000030, 0xfc00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"d32slr",		"-A,-D,-B,-C,-S", 0x70000031, 0xfc00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"d32sar",		"-A,-D,-B,-C,-S", 0x70000033, 0xfc00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"q16sll",		"-A,-D,-B,-C,-S", 0x70000034, 0xfc00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"q16slr",		"-A,-D,-B,-C,-S", 0x70000035, 0xfc00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"q16sar",		"-A,-D,-B,-C,-S", 0x70000037, 0xfc00003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"s32sfl",		"-A,-D,-B,-C,-i", 0x7000003d, 0xfcc0003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXU1,	0 },
++{"q16scop",		"-A,-D,-B,-C", 0x7000003b, 0xffc0003f, WR_1|WR_2|RD_3|RD_4,		0,	I32,	MXUR2,	0 },
+ };
+ 
+ #define MIPS_NUM_OPCODES \
+-- 
+2.41.0
+

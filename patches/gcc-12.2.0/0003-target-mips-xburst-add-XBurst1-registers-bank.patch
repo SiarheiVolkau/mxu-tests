@@ -1,0 +1,293 @@
+From a3ad9e282aec219de85d0a3738037ef6c18d99e6 Mon Sep 17 00:00:00 2001
+From: Siarhei Volkau <lis8215@gmail.com>
+Date: Mon, 17 Jul 2023 12:07:34 +0300
+Subject: [PATCH 3/4] target/mips/xburst: add XBurst1 registers bank
+
+It consists of 16 data registers xr0-xr15, where $xr0 is always zero
+and control register xr16, alternate name mxu_cr
+---
+ gcc/config/mips/mips.cc |  28 ++++++++++-
+ gcc/config/mips/mips.h  | 105 ++++++++++++++++++++++++++--------------
+ 2 files changed, 97 insertions(+), 36 deletions(-)
+
+diff --git a/gcc/config/mips/mips.cc b/gcc/config/mips/mips.cc
+index 10ff69b7e..a16a4e44e 100644
+--- a/gcc/config/mips/mips.cc
++++ b/gcc/config/mips/mips.cc
+@@ -600,7 +600,13 @@ const enum reg_class mips_regno_to_class[FIRST_PSEUDO_REGISTER] = {
+   COP3_REGS,	COP3_REGS,	COP3_REGS,	COP3_REGS,
+   DSP_ACC_REGS,	DSP_ACC_REGS,	DSP_ACC_REGS,	DSP_ACC_REGS,
+   DSP_ACC_REGS,	DSP_ACC_REGS,	ALL_REGS,	ALL_REGS,
+-  ALL_REGS,	ALL_REGS,	ALL_REGS,	ALL_REGS
++  ALL_REGS,	ALL_REGS,	ALL_REGS,	ALL_REGS,
++  NO_REGS,      NO_REGS,        NO_REGS,        NO_REGS,
++  MXU_REGS,     MXU_REGS,       MXU_REGS,       MXU_REGS,
++  MXU_REGS,     MXU_REGS,       MXU_REGS,       MXU_REGS,
++  MXU_REGS,     MXU_REGS,       MXU_REGS,       MXU_REGS,
++  MXU_REGS,     MXU_REGS,       MXU_REGS,       MXU_REGS,
++  MXU_CR
+ };
+ 
+ static tree mips_handle_interrupt_attr (tree *, tree, tree, int, bool *);
+@@ -13071,6 +13077,9 @@ mips_hard_regno_mode_ok_uncached (unsigned int regno, machine_mode mode)
+   if (regno == GOT_VERSION_REGNUM)
+     return mode == SImode;
+ 
++  if (MXU_REG_P (regno))
++    return VECTOR_MODE_P (mode) && size <= UNITS_PER_WORD;
++
+   return false;
+ }
+ 
+@@ -13342,6 +13351,9 @@ mips_move_to_gpr_cost (reg_class_t from)
+       /* This choice of value is historical.  */
+       return 5;
+ 
++    case MXU_REGS:
++      return 6;
++
+     default:
+       return 0;
+     }
+@@ -13369,6 +13381,9 @@ mips_move_from_gpr_cost (reg_class_t to)
+       /* MTC1, etc.  */
+       return 4;
+ 
++    case MXU_REGS:
++      return 4;
++
+     case COP0_REGS:
+     case COP2_REGS:
+     case COP3_REGS:
+@@ -13394,6 +13409,9 @@ mips_register_move_cost (machine_mode mode,
+   from = mips_canonicalize_move_class (from);
+   to = mips_canonicalize_move_class (to);
+ 
++  if (to == MXU_REGS && from == MXU_REGS)
++    return 2;
++
+   /* Handle moves that can be done without using general-purpose registers.  */
+   if (from == FP_REGS)
+     {
+@@ -13580,6 +13598,7 @@ mips_vector_mode_supported_p (machine_mode mode)
+     case E_V2UHAmode:
+     case E_V4QQmode:
+     case E_V4UQQmode:
++      /* TODO add MXU support */
+       return TARGET_DSP;
+ 
+     case E_V2SImode:
+@@ -13613,6 +13632,7 @@ mips_preferred_simd_mode (scalar_mode mode)
+       && mode == SFmode)
+     return V2SFmode;
+ 
++  /* TODO MXU support */
+   if (!ISA_HAS_MSA)
+     return word_mode;
+ 
+@@ -20693,6 +20713,12 @@ mips_conditional_register_usage (void)
+   else
+     accessible_reg_set &= ~reg_class_contents[DSP_ACC_REGS];
+ 
++  if (!ISA_HAS_MXU1_R1 && !ISA_HAS_MXU1_LX)
++    {
++      accessible_reg_set &= ~reg_class_contents[MXU_REGS];
++      accessible_reg_set &= ~reg_class_contents[MXU_CR];
++    }
++
+   if (!ISA_HAS_HILO)
+     accessible_reg_set &= ~reg_class_contents[MD_REGS];
+ 
+diff --git a/gcc/config/mips/mips.h b/gcc/config/mips/mips.h
+index c6bbcb1a7..8a5bc033e 100644
+--- a/gcc/config/mips/mips.h
++++ b/gcc/config/mips/mips.h
+@@ -1822,9 +1822,11 @@ FP_ASM_SPEC "\
+ 	- CPRESTORE_SLOT_REGNUM
+    - 2 dummy entries that were used at various times in the past.
+    - 6 DSP accumulator registers (3 hi-lo pairs) for MIPS DSP ASE
+-   - 6 DSP control registers  */
++   - 6 DSP control registers
++   - 16 XBurst MXU data registers
++   - 1 XBurst MXU control register */
+ 
+-#define FIRST_PSEUDO_REGISTER 188
++#define FIRST_PSEUDO_REGISTER 209
+ 
+ /* By default, fix the kernel registers ($26 and $27), the global
+    pointer ($28) and the stack pointer ($29).  This can change
+@@ -1853,7 +1855,13 @@ FP_ASM_SPEC "\
+   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,			\
+   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,			\
+   /* 6 DSP accumulator registers & 6 control registers */		\
+-  0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1					\
++  0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,					\
++  /* gap */								\
++  1, 1, 1, 1,								\
++  /* MXU data registers */						\
++  1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,			\
++  /* MXU control register */						\
++  1									\
+ }
+ 
+ 
+@@ -1887,7 +1895,13 @@ FP_ASM_SPEC "\
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,			\
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,			\
+   /* 6 DSP accumulator registers & 6 control registers */		\
+-  1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0					\
++  1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,					\
++  /* gap */								\
++  0, 0, 0, 0,								\
++  /* MXU data registers */						\
++  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,			\
++  /* MXU control register */						\
++  0									\
+ }
+ 
+ /* Internal macros to classify a register number as to whether it's a
+@@ -1916,6 +1930,11 @@ FP_ASM_SPEC "\
+ #define MSA_REG_LAST  FP_REG_LAST
+ #define MSA_REG_NUM   FP_REG_NUM
+ 
++#define MXU_REG_FIRST 192
++#define MXU_REG_LAST  207
++#define MXU_REG_NUM   (MXU_REG_LAST - MXU_REG_FIRST + 1)
++#define MXU_CR_REG    208
++
+ /* The DWARF 2 CFA column which tracks the return address from a
+    signal handler context.  This means that to maintain backwards
+    compatibility, no hard register can be assigned this column if it
+@@ -2006,9 +2025,12 @@ FP_ASM_SPEC "\
+   (MD_REG_P (REGNO) || DSP_ACC_REG_P (REGNO))
+ #define MSA_REG_P(REGNO) \
+   ((unsigned int) ((int) (REGNO) - MSA_REG_FIRST) < MSA_REG_NUM)
++#define MXU_REG_P(REGNO)	\
++  ((unsigned int) ((int) (REGNO) - MXU_REG_FIRST) < MXU_REG_NUM)
+ 
+ #define FP_REG_RTX_P(X) (REG_P (X) && FP_REG_P (REGNO (X)))
+ #define MSA_REG_RTX_P(X) (REG_P (X) && MSA_REG_P (REGNO (X)))
++#define MXU_REG_RTX_P(X) (REG_P (X) && MXU_REG_P (REGNO (X)))
+ 
+ /* True if X is (const (unspec [(const_int 0)] UNSPEC_GP)).  This is used
+    to initialize the mips16 gp pseudo register.  */
+@@ -2155,6 +2177,8 @@ enum reg_class
+   DSP_ACC_REGS,			/* DSP accumulator registers */
+   ACC_REGS,			/* Hi/Lo and DSP accumulator registers */
+   FRAME_REGS,			/* $arg and $frame */
++  MXU_REGS,			/* XBurst MXU data registers $xr0-$xr15 */
++  MXU_CR,			/* XBurst MXU control register $xr16 or $mxu_cr */
+   GR_AND_MD0_REGS,		/* union classes */
+   GR_AND_MD1_REGS,
+   GR_AND_MD_REGS,
+@@ -2196,6 +2220,8 @@ enum reg_class
+   "DSP_ACC_REGS",							\
+   "ACC_REGS",								\
+   "FRAME_REGS",								\
++  "MXU_REGS",								\
++  "MXU_CR",								\
+   "GR_AND_MD0_REGS",							\
+   "GR_AND_MD1_REGS",							\
+   "GR_AND_MD_REGS",							\
+@@ -2214,35 +2240,37 @@ enum reg_class
+    sub-initializer must be suitable as an initializer for the type
+    `HARD_REG_SET' which is defined in `hard-reg-set.h'.  */
+ 
+-#define REG_CLASS_CONTENTS						                                \
+-{									                                \
+-  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* NO_REGS */		\
+-  { 0x000200fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_STORE_REGS */	\
+-  { 0x000300fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_REGS */		\
+-  { 0x200300fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_SP_REGS */		\
+-  { 0x01000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* T_REG */		\
+-  { 0x010300fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_T_REGS */	\
+-  { 0x02000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* PIC_FN_ADDR_REG */	\
+-  { 0x00000008, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* V1_REG */		\
+-  { 0x0303fffc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* SPILL_REGS */      	\
+-  { 0xfdffffff, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* LEA_REGS */		\
+-  { 0xffffffff, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* GR_REGS */		\
+-  { 0x00000000, 0xffffffff, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* FP_REGS */		\
+-  { 0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00000000, 0x00000000 },	/* MD0_REG */		\
+-  { 0x00000000, 0x00000000, 0x00000002, 0x00000000, 0x00000000, 0x00000000 },	/* MD1_REG */		\
+-  { 0x00000000, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x00000000 },	/* MD_REGS */		\
+-  { 0x00000000, 0x00000000, 0xffff0000, 0x0000ffff, 0x00000000, 0x00000000 },   /* COP0_REGS */		\
+-  { 0x00000000, 0x00000000, 0x00000000, 0xffff0000, 0x0000ffff, 0x00000000 },   /* COP2_REGS */		\
+-  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xffff0000, 0x0000ffff },   /* COP3_REGS */		\
+-  { 0x00000000, 0x00000000, 0x000007f8, 0x00000000, 0x00000000, 0x00000000 },	/* ST_REGS */		\
+-  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x003f0000 },	/* DSP_ACC_REGS */	\
+-  { 0x00000000, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x003f0000 },	/* ACC_REGS */		\
+-  { 0x00000000, 0x00000000, 0x00006000, 0x00000000, 0x00000000, 0x00000000 },	/* FRAME_REGS */	\
+-  { 0xffffffff, 0x00000000, 0x00000001, 0x00000000, 0x00000000, 0x00000000 },	/* GR_AND_MD0_REGS */	\
+-  { 0xffffffff, 0x00000000, 0x00000002, 0x00000000, 0x00000000, 0x00000000 },	/* GR_AND_MD1_REGS */	\
+-  { 0xffffffff, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x00000000 },	/* GR_AND_MD_REGS */	\
+-  { 0xffffffff, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x003f0000 },	/* GR_AND_ACC_REGS */	\
+-  { 0xffffffff, 0xffffffff, 0xffff67ff, 0xffffffff, 0xffffffff, 0x0fffffff }	/* ALL_REGS */		\
++#define REG_CLASS_CONTENTS						                                                \
++{									                                                \
++  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* NO_REGS */		\
++  { 0x000200fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_STORE_REGS */	\
++  { 0x000300fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_REGS */		\
++  { 0x200300fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_SP_REGS */	\
++  { 0x01000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* T_REG */		\
++  { 0x010300fc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* M16_T_REGS */	\
++  { 0x02000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* PIC_FN_ADDR_REG */	\
++  { 0x00000008, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* V1_REG */		\
++  { 0x0303fffc, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* SPILL_REGS */      	\
++  { 0xfdffffff, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* LEA_REGS */		\
++  { 0xffffffff, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* GR_REGS */		\
++  { 0x00000000, 0xffffffff, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* FP_REGS */		\
++  { 0x00000000, 0x00000000, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* MD0_REG */		\
++  { 0x00000000, 0x00000000, 0x00000002, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* MD1_REG */		\
++  { 0x00000000, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* MD_REGS */		\
++  { 0x00000000, 0x00000000, 0xffff0000, 0x0000ffff, 0x00000000, 0x00000000, 0x00000000 },	/* COP0_REGS */		\
++  { 0x00000000, 0x00000000, 0x00000000, 0xffff0000, 0x0000ffff, 0x00000000, 0x00000000 },	/* COP2_REGS */		\
++  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xffff0000, 0x0000ffff, 0x00000000 },	/* COP3_REGS */		\
++  { 0x00000000, 0x00000000, 0x000007f8, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* ST_REGS */		\
++  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x003f0000, 0x00000000 },	/* DSP_ACC_REGS */	\
++  { 0x00000000, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x003f0000, 0x00000000 },	/* ACC_REGS */		\
++  { 0x00000000, 0x00000000, 0x00006000, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* FRAME_REGS */	\
++  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000ffff },	/* MXU_REGS */		\
++  { 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00010000 },	/* MXU_CR */		\
++  { 0xffffffff, 0x00000000, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* GR_AND_MD0_REGS */	\
++  { 0xffffffff, 0x00000000, 0x00000002, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* GR_AND_MD1_REGS */	\
++  { 0xffffffff, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x00000000, 0x00000000 },	/* GR_AND_MD_REGS */	\
++  { 0xffffffff, 0x00000000, 0x00000003, 0x00000000, 0x00000000, 0x003f0000, 0x00000000 },	/* GR_AND_ACC_REGS */	\
++  { 0xffffffff, 0xffffffff, 0xffff67ff, 0xffffffff, 0xffffffff, 0x0fffffff, 0x0001ffff }	/* ALL_REGS */		\
+ }
+ 
+ 
+@@ -2279,6 +2307,9 @@ enum reg_class
+      of the extra accumulators available with -mdspr2.  In some cases,	\
+      it can also help to reduce register pressure.  */			\
+   64, 65,176,177,178,179,180,181,					\
++  /* MXU registers: same reason as -mdspr2 */				\
++  193,194,195,196,197,198,199,200,					\
++  201,202,203,204,205,206,207,						\
+   /* Call-clobbered GPRs.  */						\
+   1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,		\
+   24, 25, 31,								\
+@@ -2816,7 +2847,10 @@ typedef struct mips_args {
+   "$c3r16","$c3r17","$c3r18","$c3r19","$c3r20","$c3r21","$c3r22","$c3r23", \
+   "$c3r24","$c3r25","$c3r26","$c3r27","$c3r28","$c3r29","$c3r30","$c3r31", \
+   "$ac1hi","$ac1lo","$ac2hi","$ac2lo","$ac3hi","$ac3lo","$dsp_po","$dsp_sc", \
+-  "$dsp_ca","$dsp_ou","$dsp_cc","$dsp_ef" }
++  "$dsp_ca","$dsp_ou","$dsp_cc","$dsp_ef", "", "",      "",      "",	   \
++  "$xr0",  "$xr1",  "$xr2",  "$xr3",  "$xr4",  "$xr5",  "$xr6",  "$xr7",   \
++  "$xr8",  "$xr9",  "$xr10", "$xr11", "$xr12", "$xr13", "$xr14", "$xr15",  \
++  "$xr16" }
+ 
+ /* List the "software" names for each register.  Also list the numerical
+    names for $fp and $sp.  */
+@@ -2887,7 +2921,8 @@ typedef struct mips_args {
+   { "$w28",	28 + FP_REG_FIRST },					\
+   { "$w29",	29 + FP_REG_FIRST },					\
+   { "$w30",	30 + FP_REG_FIRST },					\
+-  { "$w31",	31 + FP_REG_FIRST }					\
++  { "$w31",	31 + FP_REG_FIRST },					\
++  { "mxu_cr",	     MXU_CR }						\
+ }
+ 
+ #define DBR_OUTPUT_SEQEND(STREAM)					\
+-- 
+2.41.0
+

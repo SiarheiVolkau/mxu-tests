@@ -1,0 +1,178 @@
+From 45616ba3249f53ded68bfa36968c5702c0f09842 Mon Sep 17 00:00:00 2001
+From: Siarhei Volkau <lis8215@gmail.com>
+Date: Sun, 16 Jul 2023 13:12:48 +0300
+Subject: [PATCH 1/4] target/mips/xburst: add option to control XBurst MXU v1
+ extension
+
+---
+ gcc/config.gcc              | 23 +++++++++++++++++++++--
+ gcc/config/mips/mips-opts.h |  8 ++++++++
+ gcc/config/mips/mips.h      | 28 +++++++++++++++++++++++++++-
+ gcc/config/mips/mips.opt    | 29 +++++++++++++++++++++++++++++
+ 4 files changed, 85 insertions(+), 3 deletions(-)
+
+diff --git a/gcc/config.gcc b/gcc/config.gcc
+index c5064dd37..411818d13 100644
+--- a/gcc/config.gcc
++++ b/gcc/config.gcc
+@@ -4800,7 +4800,7 @@ case "${target}" in
+ 		;;
+ 
+ 	mips*-*-*)
+-		supported_defaults="abi arch arch_32 arch_64 float fpu nan fp_32 odd_spreg_32 tune tune_32 tune_64 divide llsc mips-plt synci lxc1-sxc1 madd4"
++		supported_defaults="abi arch arch_32 arch_64 float fpu nan fp_32 odd_spreg_32 tune tune_32 tune_64 divide llsc mips-plt synci lxc1-sxc1 madd4 mxu"
+ 
+ 		case ${with_float} in
+ 		"" | soft | hard)
+@@ -4953,6 +4953,25 @@ case "${target}" in
+ 			exit 1
+ 			;;
+ 		esac
++
++		case ${with_mxu} in
++		r1 | 1.0)
++			with_mxu="mxu=r1"
++			;;
++		r2 | 1.1)
++			with_mxu="mxu=r2"
++			;;
++		lx)
++			with_mxu="mxu=lx"
++			;;
++		"" | no)
++			with_mxu="mxu=off"
++			;;
++		*)
++			echo "Unknown option used in --with-mxu=$with_mxu" 1>&2
++			exit 1
++			;;
++		esac
+ 		;;
+ 
+ 	loongarch*-*-*)
+@@ -5867,7 +5886,7 @@ case ${target} in
+ esac
+ 
+ t=
+-all_defaults="abi cpu cpu_32 cpu_64 arch arch_32 arch_64 tune tune_32 tune_64 schedule float mode fpu nan fp_32 odd_spreg_32 divide llsc mips-plt synci tls lxc1-sxc1 madd4 isa_spec"
++all_defaults="abi cpu cpu_32 cpu_64 arch arch_32 arch_64 tune tune_32 tune_64 schedule float mode fpu nan fp_32 odd_spreg_32 divide llsc mips-plt synci tls lxc1-sxc1 madd4 isa_spec mxu"
+ for option in $all_defaults
+ do
+ 	eval "val=\$with_"`echo $option | sed s/-/_/g`
+diff --git a/gcc/config/mips/mips-opts.h b/gcc/config/mips/mips-opts.h
+index 12ceb6d19..c31cfae0c 100644
+--- a/gcc/config/mips/mips-opts.h
++++ b/gcc/config/mips/mips-opts.h
+@@ -53,4 +53,12 @@ enum mips_cb_setting {
+   MIPS_CB_OPTIMAL,
+   MIPS_CB_ALWAYS
+ };
++
++/* Enumerates the setting of the -mmxu= option.  */
++enum xburst_mxu_versions {
++  XBURST_MXU_NONE,
++  XBURST_MXU_V1_R1,
++  XBURST_MXU_V1_R2,
++  XBURST_MXU_V1_LX,
++};
+ #endif
+diff --git a/gcc/config/mips/mips.h b/gcc/config/mips/mips.h
+index 858bbba3a..92a02e4cd 100644
+--- a/gcc/config/mips/mips.h
++++ b/gcc/config/mips/mips.h
+@@ -677,6 +677,12 @@ struct mips_cpu_info {
+ 	builtin_define ("__mips_no_lxc1_sxc1");				\
+       if (!ISA_HAS_UNFUSED_MADD4 && !ISA_HAS_FUSED_MADD4)		\
+ 	builtin_define ("__mips_no_madd4");				\
++      if (ISA_HAS_MXU1_LX)						\
++	builtin_define ("__xburst_mxu_lx");				\
++      if (ISA_HAS_MXU1_R1)						\
++	builtin_define ("__xburst_mxu_r1");				\
++      if (ISA_HAS_MXU1_R2)						\
++	builtin_define ("__xburst_mxu_r2");				\
+     }									\
+   while (0)
+ 
+@@ -913,7 +919,8 @@ struct mips_cpu_info {
+   {"mips-plt", "%{!mplt:%{!mno-plt:-m%(VALUE)}}" }, \
+   {"synci", "%{!msynci:%{!mno-synci:-m%(VALUE)}}" },			\
+   {"lxc1-sxc1", "%{!mlxc1-sxc1:%{!mno-lxc1-sxc1:-m%(VALUE)}}" }, \
+-  {"madd4", "%{!mmadd4:%{!mno-madd4:-m%(VALUE)}}" } \
++  {"madd4", "%{!mmadd4:%{!mno-madd4:-m%(VALUE)}}" }, \
++  {"mxu", "%{!mmxu=*:-m%(VALUE)}" } \
+ 
+ /* A spec that infers the:
+    -mnan=2008 setting from a -mips argument,
+@@ -1369,6 +1376,24 @@ struct mips_cpu_info {
+ /* The CACHE instruction is available.  */
+ #define ISA_HAS_CACHE (TARGET_CACHE_BUILTIN && !TARGET_MIPS16)
+ 
++/* ISA includes XBurst MXU version 1 revision 1 instruction set.  */
++#define ISA_HAS_MXU1_R1 \
++   ((xburst_mxu_version == XBURST_MXU_V1_R1 \
++     || xburst_mxu_version == XBURST_MXU_V1_R2) \
++    && !TARGET_MIPS16 && !TARGET_64BIT)
++
++/* ISA includes XBurst MXU version 1 revision 2 instruction set.  */
++#define ISA_HAS_MXU1_R2 \
++   ((xburst_mxu_version == XBURST_MXU_V1_R2) \
++    && !TARGET_MIPS16 && !TARGET_64BIT)
++
++/* ISA includes only LX{B,H,W}{,U} instructions subset of MXU1 revision 2.
++   Usable for targets which are not aware about MXU specific registers */
++#define ISA_HAS_MXU1_LX \
++   ((xburst_mxu_version == XBURST_MXU_V1_LX \
++     || xburst_mxu_version == XBURST_MXU_V1_R2) \
++    && !TARGET_MIPS16 && !TARGET_64BIT)
++
+ /* Tell collect what flags to pass to nm.  */
+ #ifndef NM_FLAGS
+ #define NM_FLAGS "-Bn"
+@@ -1432,6 +1457,7 @@ struct mips_cpu_info {
+ %{mloongson-mmi} %{mno-loongson-mmi} \
+ %{mloongson-ext} %{mno-loongson-ext} \
+ %{mloongson-ext2} %{mno-loongson-ext2} \
++%{mmxu=*} \
+ %{msmartmips} %{mno-smartmips} \
+ %{mmt} %{mno-mt} \
+ %{mfix-r5900} %{mno-fix-r5900} \
+diff --git a/gcc/config/mips/mips.opt b/gcc/config/mips/mips.opt
+index ec81edef9..d74150c98 100644
+--- a/gcc/config/mips/mips.opt
++++ b/gcc/config/mips/mips.opt
+@@ -479,3 +479,32 @@ Use Loongson EXTension (EXT) instructions.
+ mloongson-ext2
+ Target Var(TARGET_LOONGSON_EXT2)
+ Use Loongson EXTension R2 (EXT2) instructions.
++
++mmxu=
++Target RejectNegative JoinedOrMissing Var(xburst_mxu_version) Enum(xburst_mxu_versions) Init(XBURST_MXU_NONE)
++Use XBurst MXU (SIMD) instructions of specified revision.
++
++Enum
++Name(xburst_mxu_versions) Type(enum xburst_mxu_versions)
++MXU revisions available for use with -mmxu=:
++
++EnumValue
++Enum(xburst_mxu_versions) String(none) Value(XBURST_MXU_NONE)
++
++EnumValue
++Enum(xburst_mxu_versions) String(off) Value(XBURST_MXU_NONE)
++
++EnumValue
++Enum(xburst_mxu_versions) String(r1) Value(XBURST_MXU_V1_R1)
++
++EnumValue
++Enum(xburst_mxu_versions) String(1.0) Value(XBURST_MXU_V1_R1)
++
++EnumValue
++Enum(xburst_mxu_versions) String(r2) Value(XBURST_MXU_V1_R2)
++
++EnumValue
++Enum(xburst_mxu_versions) String(1.1) Value(XBURST_MXU_V1_R2)
++
++EnumValue
++Enum(xburst_mxu_versions) String(lx) Value(XBURST_MXU_V1_LX)
+-- 
+2.41.0
+
